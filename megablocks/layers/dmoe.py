@@ -159,7 +159,7 @@ class ParallelDroplessMLP(moe.ParallelMLP):
             x,
             indices,
             bin_ids,
-            expert_weights,
+            None,#expert_weights,
             bins,
             padded_bins,
             self.top_k)
@@ -207,7 +207,7 @@ class ParallelDroplessMLP(moe.ParallelMLP):
             x,
             indices,
             bin_ids,
-            expert_weights,
+            None,#expert_weights,
             bins,
             padded_bins,
             top_k)
@@ -261,7 +261,7 @@ class ParallelDroplessMLP(moe.ParallelMLP):
             x,
             indices,
             bin_ids,
-            expert_weights,
+            None,#expert_weights,
             bins,
             top_k)
 

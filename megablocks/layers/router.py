@@ -52,8 +52,23 @@ class LearnedRouter(torch.nn.Module):
         if self.training and self.args.moe_jitter_eps is not None:
             x = x * self.jitter(x)
 
-        scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
-        expert_weights, expert_indices = self._top_k(scores)
+        if self.args.moe_expert_choice:
+            # Get probability for each token
+            bs, sq, _ = x.shape
+            capacity = self.args.moe_top_k # Use top k as the capacity to match regular MoEs
+            scores = self.layer(x).softmax(dim=1) # [batch_size, seq_len, dim] -> [batch_size, seq_len, num_experts]
+            # Let experts choose the highest prob tokens
+            # k = n * c / e (https://arxiv.org/pdf/2202.09368)
+            # where n = tokens (in the paper it seems they even do tokens across batches not just within each batch
+            #; could ablate this by folding together bs & sq)
+            # c = capacity (1 or 2 in the paper) & e = num_experts
+            # [batch_size, seq_len, num_experts] -> [batch_size, k, num_experts] (k is not top k here!!!)
+            # expert_weights corresponds to matrix G (e x k) in the paper
+            # expert_indices corresponds to matrix I (e x k) in the paper
+            expert_weights, expert_indices = torch.topk(scores, (capacity * sq) // self.args.moe_num_experts, dim=1)
+        else:
+            scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
+            expert_weights, expert_indices = self._top_k(scores)
         if self.args.moe_normalize_expert_weights:
             expert_weights = expert_weights / torch.norm(
                 expert_weights, p=self.args.moe_normalize_expert_weights,dim=-1, keepdim=True)

@@ -53,10 +53,11 @@ class LearnedRouter(torch.nn.Module):
             x = x * self.jitter(x)
 
         if self.args.moe_expert_choice:
+            #import pdb; pdb.set_trace()
             # Get probability for each token
             bs, sq, _ = x.shape
             capacity = self.args.moe_top_k # Use top k as the capacity to match regular MoEs
-            scores = self.layer(x).softmax(dim=1) # [batch_size, seq_len, dim] -> [batch_size, seq_len, num_experts]
+            ###scores = self.layer(x).softmax(dim=1) # [batch_size, seq_len, dim] -> [batch_size, seq_len, num_experts]
             # Let experts choose the highest prob tokens
             # k = n * c / e (https://arxiv.org/pdf/2202.09368)
             # where n = tokens (in the paper it seems they even do tokens across batches not just within each batch
@@ -65,10 +66,18 @@ class LearnedRouter(torch.nn.Module):
             # [batch_size, seq_len, num_experts] -> [batch_size, k, num_experts] (k is not top k here!!!)
             # expert_weights corresponds to matrix G (e x k) in the paper
             # expert_indices corresponds to matrix I (e x k) in the paper
-            expert_weights, expert_indices = torch.topk(scores, (capacity * sq) // self.args.moe_num_experts, dim=1)
+            ###expert_weights, expert_indices = torch.topk(scores, (capacity * sq) // self.args.moe_num_experts, dim=1)
+
+            # Softmax is still taken along expert dim, not token dim.
+            # https://github.com/google/flaxformer/blob/399ea3a85e9807ada653fd0de1a9de627eb0acde/flaxformer/architectures/moe/routing.py#L322C7-L322C66
+            scores = self.layer(x).softmax(dim=-1) # [batch_size, seq_len, num_experts]
+            # [batch_size, num_experts, k]
+            expert_weights, expert_indices = torch.topk(scores.transpose(1,2), (capacity * sq) // self.args.moe_num_experts, dim=-1)
+
         else:
             scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
             expert_weights, expert_indices = self._top_k(scores)
+
         if self.args.moe_normalize_expert_weights:
             expert_weights = expert_weights / torch.norm(
                 expert_weights, p=self.args.moe_normalize_expert_weights,dim=-1, keepdim=True)

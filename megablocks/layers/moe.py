@@ -458,8 +458,36 @@ class ParallelMLP(torch.nn.Module):
         Refs:
         - https://arxiv.org/pdf/2202.09368
         - https://github.com/google/flaxformer/blob/main/flaxformer/architectures/moe/routing.py#L647-L717
+        - https://github.com/google/flaxformer/blob/399ea3a85e9807ada653fd0de1a9de627eb0acde/flaxformer/architectures/moe/moe_layers.py#L361
         - https://github.com/microsoft/DeepSpeed/issues/2517
         """
+        #import pdb; pdb.set_trace()
+        bs, sl, hs = x.shape
+        _, num_experts, k = expert_weights.shape
+        # [bs, num_experts, k, sl]
+        expert_gather_indices = torch.nn.functional.one_hot(top_experts, num_classes=sl).to(x.dtype)
+        # [bs, sl, num_experts, k]
+        expert_gather_indices = torch.moveaxis(expert_gather_indices, 3, 1)
+        x_in = torch.einsum('bs...,bsek->bek...', x, expert_gather_indices)
+        x_in = x_in.permute(1, 0, 2, 3).reshape(num_experts, bs * k, hs)
+        x_e = self.mlp(x_in) # [num_experts, bs*k, d]
+        combine_array = torch.einsum('...ek,...sek->...sek', expert_weights, expert_gather_indices)
+        x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 0, 2, 3)
+        x_out = torch.einsum('bek...,bsek->bs...', x_e, combine_array)
+        return x_out
+
+        #expert_gather_indices = expert_gather_indices.permute(0, 3, 2, 1)
+        #x_in = torch.einsum('beks,bsd->bked', expert_gather_indices, x)
+        #x_in = x_in.permute(2, 0, 1, 3).reshape(num_experts, bs * k, hs)
+        #x_e = self.mlp(x_in)
+        #expert_gather_indices = expert_gather_indices.permute(0, 3, 2, 1)
+        #combine_array = torch.einsum('...ek,...tek->...tek', expert_weights, expert_gather_indices)
+        #x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 0, 2, 3)
+        #x_out = torch.einsum('bekd,btek->btd', x_e, combine_array)
+        #return x_out
+        """
+
+        #import pdb; pdb.set_trace()
         # x: [bs, sl, hs]
         # S / scores: [bs, sl, num_experts]
         # G / expert_weights: [bs, k, num_experts]
@@ -471,7 +499,9 @@ class ParallelMLP(torch.nn.Module):
 
         # X_in = P · X
         # P[bs, k, num_experts, sl] X[bs, sl, hs] -> [bs, k, num_experts, hs]
-        x_in = torch.einsum('bkes,bsd->bked', expert_gather_indices, x)
+        # This selects the tokens acc to the indices
+        # x[0,int(torch.argmax(expert_gather_indices[0,0,0,:])),0] == x_in[0,0,0,0] should be true
+        x_in = torch.einsum('bkes,bsd->bked', expert_gather_indices, x) # (expert_gather_indices @ x.unsqueeze(1)
 
         # X_in[bs, k, num_experts, hs] -> X_in[num_experts, bs*k, d]
         x_in = x_in.permute(2, 0, 1, 3).reshape(num_experts, bs * k, hs)
@@ -485,16 +515,42 @@ class ParallelMLP(torch.nn.Module):
 
         # P[i, j, l] · G[i, j]
         # G[bs, k, num_experts] P[bs, sl, num_experts, k] -> [bs, sl, num_experts, k]
-        combine_array = torch.einsum('...ce,...tec->...tec', expert_weights, expert_gather_indices)
+        # This array contains the weight for each token and 0 for tokens that were not used for the given expert
+        # max(combine_array[0,:,0,0]) == combine_array[0,:,0,0].sum() should be true
+        # torch.argmax(combine_array[0,:,0,0]) == torch.argmax(expert_gather_indices[0,:,0,0]) should be true
+        # combine_array[0,:,0,:].sum() is the sum of all weights for expert 0; It's not 1 as some remain unused
+        # combine_array[0,:,2,:].sum() should roughly equal  expert_weights[0,:,2].sum() (not exact due to bfloat16)
+        combine_array = torch.einsum('...ke,...tek->...tek', expert_weights, expert_gather_indices)
 
         # X_e[num_experts, bs*k, d] -> X_e[bs, k, num_experts, hs]
-        x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 2, 0, 3)
+        #x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 2, 0, 3)
+        #FLAX: 
+        x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 0, 2, 3)
 
         # X_out = P[i, j, l] · G[i, j] · X_e[i, j, d]
         # combine_array[bs, sl, num_experts, k] X_e[bs, k, num_experts, hs] -> [bs, sl, hs]
-        x_out = torch.einsum('btec,bced->btd', combine_array, x_e)
+        # Sums across experts (e or i) and selected tokens (k or j)
+        # We cannot sum over k as each expert has different k tokens
+
+        # Shape: [num_groups, tokens_per_group, hidden_dims]
+        # combined_outputs = jnp.einsum(
+        #     'gec...,gtec->gt...',
+        #     expert_outputs,
+        #     router_mask.combine_array,
+        #     precision=self.precision,
+        # )
+        # TODO: Compare with flaxformers
+        #FLAX: 
+        x_out = torch.einsum('bekd,btek->btd', x_e, combine_array) # ; looks like its the same
+        #x_out = torch.sum((x_e.permute(0,1,3,2) @ combine_array.permute(0,2,3,1)), dim=1).permute(0,2,1)
+        #x_out = torch.einsum('btek,bked->btd', combine_array, x_e) # (combine_array @ x_e)
+        # Dot over e; Summing over k:
+        # torch.sum((combine_array.permute(0,3,1,2) @ x_e), dim=1) == x_out is False
+        # Summing over e:
+        # torch.sum((combine_array.permute(0,2,1,3) @ x_e.permute(0,2,1,3)), dim=1) == x_out is False (almost same as above)
 
         return x_out
+        """
 
 
 

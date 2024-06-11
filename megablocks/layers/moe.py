@@ -130,6 +130,8 @@ class ParallelMLP(torch.nn.Module):
             self.register_parameter('bias', None)
 
         # Select the forward function for the operating mode.
+        if self.args.moe_expert_choice_grouped:
+            self.forward = self.forward_ec_grouped
         if self.args.moe_expert_choice:
             self.forward = self.forward_ec
         elif args.moe_expert_model_parallelism:
@@ -447,6 +449,34 @@ class ParallelMLP(torch.nn.Module):
                 return x, self.bias
             return x + self.bias
         return x
+
+    def forward_ec_grouped(self, x, scores, expert_weights, top_experts):
+        bs, sl, hs = x.shape
+        num_experts, k = expert_weights.shape
+    
+        x = x.flatten(start_dim=0, end_dim=1)
+        x = torch.index_select(x, dim=0, index=top_experts.flatten())
+        x = x.reshape((num_experts, k, hs))
+        x = self.mlp(x)
+        x = torch.einsum("ekd,ek->ekd", x, expert_weights)
+        x = x.flatten(start_dim=0, end_dim=1)
+        z = torch.zeros((bs * sl, hs)).type(x.type()).to(x.device)
+        z.index_add_(dim=0, index=top_experts.flatten().to(int), source=x)
+        x = z.reshape((bs, sl, hs))
+        return x
+        """
+        # -> [num_experts, k, bssl]
+        expert_gather_indices = torch.nn.functional.one_hot(top_experts, num_classes=bssl).to(x.dtype)
+        # [bssl, num_experts, k]
+        expert_gather_indices = torch.moveaxis(expert_gather_indices, 2, 0)
+        x_in = torch.einsum('bs...,bsek->bek...', x, expert_gather_indices)
+        x_in = x_in.permute(1, 0, 2, 3).reshape(num_experts, bs * k, hs)
+        x_e = self.mlp(x_in) # [num_experts, bs*k, d]
+        combine_array = torch.einsum('...ek,...sek->...sek', expert_weights, expert_gather_indices)
+        x_e = x_e.reshape(num_experts, bs, k, hs).permute(1, 0, 2, 3)
+        x_out = torch.einsum('bek...,bsek->bs...', x_e, combine_array)
+        return x_out
+        """
 
     def forward_ec(self, x, scores, expert_weights, top_experts):
         """

@@ -67,13 +67,18 @@ class LearnedRouter(torch.nn.Module):
             # expert_weights corresponds to matrix G (e x k) in the paper
             # expert_indices corresponds to matrix I (e x k) in the paper
             ###expert_weights, expert_indices = torch.topk(scores, (capacity * sq) // self.args.moe_num_experts, dim=1)
-
             # Softmax is still taken along expert dim, not token dim.
             # https://github.com/google/flaxformer/blob/399ea3a85e9807ada653fd0de1a9de627eb0acde/flaxformer/architectures/moe/routing.py#L322C7-L322C66
+            # One difference here might be that some do it grouped instead which would be folding bs & sq dims
+            # e.g. https://github.com/llm-random/llm-random/blob/c9e50b75cd99f3ae04c3c3bfad0b7f1bf17f6b88/research/conditional/moe_layers/moe_gating.py#L76
             scores = self.layer(x).softmax(dim=-1) # [batch_size, seq_len, num_experts]
             # [batch_size, num_experts, k]
             expert_weights, expert_indices = torch.topk(scores.transpose(1,2), (capacity * sq) // self.args.moe_num_experts, dim=-1)
-
+        elif self.args.moe_expert_choice_grouped:
+            bs, sq, _ = x.shape
+            capacity = self.args.moe_top_k # Use top k as the capacity to match regular MoEs
+            scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1) # [bs & sq, num_experts]
+            expert_weights, expert_indices = torch.topk(scores.transpose(0,1),  (capacity * bs * sq) // self.args.moe_num_experts, dim=-1) # [num_experts, k]
         else:
             scores = self.layer(x.view(-1, x.shape[-1])).softmax(dim=-1)
             expert_weights, expert_indices = self._top_k(scores)

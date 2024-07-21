@@ -17,7 +17,7 @@ class ParallelDroplessMLP(moe.ParallelMLP):
         super(ParallelDroplessMLP, self).__init__(args)
         self.hidden_size = args.hidden_size
         self.ffn_hidden_size = mpu.features_per_rank(args)
-        self.blocking = 128
+        self.blocking = 32
         self.mlp = dmlp_registry.get(args)
 
         # Calculate the number of bits needed to represent the column indices
